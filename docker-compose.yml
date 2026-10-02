@@ -1,0 +1,52 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: payment
+      POSTGRES_PASSWORD: payment
+      POSTGRES_DB: payment_flow
+    ports:
+      # published so the app and Jest can also run on the host
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # creates payment_flow_test on first boot (see README "Reset the environment")
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payment -d payment_flow"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  app:
+    build:
+      context: .
+      target: runtime
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      DATABASE_URL: postgres://payment:payment@db:5432/payment_flow
+      TEST_DATABASE_URL: postgres://payment:payment@db:5432/payment_flow_test
+      DATABASE_POOL_MAX: "10"
+    ports:
+      - "3000:3000"
+
+  # `docker compose run --rm tests` runs the Jest suite against the db service.
+  tests:
+    build:
+      context: .
+      target: test
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: test
+      DATABASE_URL: postgres://payment:payment@db:5432/payment_flow
+      TEST_DATABASE_URL: postgres://payment:payment@db:5432/payment_flow_test
+    command: ["npm", "test"]
+
+volumes:
+  pgdata:

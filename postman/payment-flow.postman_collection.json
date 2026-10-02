@@ -1,0 +1,676 @@
+{
+  "info": {
+    "_postman_id": "fbb2deb0-d1c8-4f48-bed9-64e6a30a3f1c",
+    "name": "payment-flow",
+    "description": "Local walk-through of the payment-flow API.\n\nImport the **payment-flow local** environment too, then run the folders top to bottom (Collection Runner makes the scripts fire in order).\n\n1. `POST /checkout-intents` creates an order and fills in the variables the other requests use.\n2. Folder **01 Checkout** shows retries, payload conflicts and 10 concurrent checkouts.\n3. Folder **02 Webhooks** shows apply, duplicate delivery, a stale failure, an event-id conflict and 10 concurrent deliveries.\n4. Folder **03 Read** shows the status endpoints.\n\nStart the service first: `docker compose up --build`.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "01 Checkout",
+      "description": "Idempotent checkout intents. Run the requests in order.",
+      "item": [
+        {
+          "name": "1. Create checkout intent (expect 201)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Fresh identifiers for every run of this collection.",
+                  "const suffix = Date.now().toString().slice(-8);",
+                  "pm.collectionVariables.set('order_reference', 'POSTMAN-ORDER-' + suffix);",
+                  "pm.collectionVariables.set('evt_succeeded', 'evt_pm_success_' + suffix);",
+                  "pm.collectionVariables.set('evt_failed', 'evt_pm_fail_' + suffix);",
+                  "pm.collectionVariables.set('evt_parallel', 'evt_pm_parallel_' + suffix);",
+                  "console.log('using order reference', pm.collectionVariables.get('order_reference'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test('created is true', () => pm.expect(body.created).to.be.true);",
+                  "pm.test('status starts as pending', () => pm.expect(body.order.status).to.eql('pending'));",
+                  "pm.test('amount is stored as integer minor units', () => pm.expect(body.order.amountMinor).to.eql(2599));",
+                  "",
+                  "// Keep the id so the requests in folder 03 can use it. Collection",
+                  "// variables only: writing to the environment would leave values behind",
+                  "// that shadow these on the next run.",
+                  "pm.collectionVariables.set('order_id', body.order.id);",
+                  "console.log('order', body.order);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/checkout-intents",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "checkout-intents"
+              ]
+            },
+            "description": "Creates the order and stores its id in the collection and environment variables.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"orderReference\": \"{{order_reference}}\",\n  \"amountMinor\": 2599,\n  \"currency\": \"EUR\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "2. Retry with identical payload (expect 200, no duplicate)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('created is false', () => pm.expect(body.created).to.be.false);",
+                  "pm.test('returns the existing order', () => pm.expect(body.order.id).to.eql(pm.collectionVariables.get('order_id')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/checkout-intents",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "checkout-intents"
+              ]
+            },
+            "description": "The business order reference is the idempotency key, so this returns the same order instead of creating a second one.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"orderReference\": \"{{order_reference}}\",\n  \"amountMinor\": 2599,\n  \"currency\": \"EUR\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "3. Retry with a different amount (expect 409, nothing changed)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 Conflict', () => pm.response.to.have.status(409));",
+                  "const body = pm.response.json();",
+                  "pm.test('error code', () => pm.expect(body.error.code).to.eql('checkout_payload_conflict'));",
+                  "pm.test('reports the conflicting field', () => pm.expect(body.error.details.conflictingFields).to.eql(['amountMinor']));",
+                  "pm.test('stored amount is untouched', () => pm.expect(body.error.details.existingOrder.amountMinor).to.eql(2599));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/checkout-intents",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "checkout-intents"
+              ]
+            },
+            "description": "Reusing a reference with a changed amount is rejected; the stored order is not modified.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"orderReference\": \"{{order_reference}}\",\n  \"amountMinor\": 9999,\n  \"currency\": \"EUR\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "02 Webhooks",
+      "description": "Provider events applied exactly once. Run after folder 01.",
+      "item": [
+        {
+          "name": "1. payment.succeeded (expect applied)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('event is applied', () => pm.expect(body.applied).to.be.true);",
+                  "pm.test('outcome is applied', () => pm.expect(body.outcome).to.eql('applied'));",
+                  "pm.test('not a duplicate', () => pm.expect(body.duplicate).to.be.false);",
+                  "pm.test('order is now succeeded', () => pm.expect(body.order.status).to.eql('succeeded'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhooks/payment-provider",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhooks",
+                "payment-provider"
+              ]
+            },
+            "description": "Moves the order from pending to succeeded.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"{{evt_succeeded}}\",\n  \"type\": \"payment.succeeded\",\n  \"createdAt\": \"2026-01-05T10:00:00.000Z\",\n  \"data\": {\n    \"orderReference\": \"{{order_reference}}\",\n    \"providerPaymentId\": \"pay_postman_1\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "2. Same event again (duplicate, no second apply)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('flagged as duplicate', () => pm.expect(body.duplicate).to.be.true);",
+                  "pm.test('not applied again', () => pm.expect(body.applied).to.be.false);",
+                  "pm.test('deliveryCount is 2', () => pm.expect(body.deliveryCount).to.eql(2));",
+                  "pm.test('order still succeeded', () => pm.expect(body.order.status).to.eql('succeeded'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhooks/payment-provider",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhooks",
+                "payment-provider"
+              ]
+            },
+            "description": "The provider never saw the first response and retries: nothing is applied twice.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"{{evt_succeeded}}\",\n  \"type\": \"payment.succeeded\",\n  \"createdAt\": \"2026-01-05T10:00:00.000Z\",\n  \"data\": {\n    \"orderReference\": \"{{order_reference}}\",\n    \"providerPaymentId\": \"pay_postman_1\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "3. Stale payment.failed after success (ignored_terminal)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('outcome is ignored_terminal', () => pm.expect(body.outcome).to.eql('ignored_terminal'));",
+                  "pm.test('not applied', () => pm.expect(body.applied).to.be.false);",
+                  "pm.test('different event id, so not a duplicate', () => pm.expect(body.duplicate).to.be.false);",
+                  "pm.test('order stays succeeded', () => pm.expect(body.order.status).to.eql('succeeded'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhooks/payment-provider",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhooks",
+                "payment-provider"
+              ]
+            },
+            "description": "Success is terminal: a late failure for the same payment cannot regress the order.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"{{evt_failed}}\",\n  \"type\": \"payment.failed\",\n  \"data\": {\n    \"orderReference\": \"{{order_reference}}\",\n    \"providerPaymentId\": \"pay_postman_1\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "4. Same event id, different payload (event_id_conflict)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('outcome is event_id_conflict', () => pm.expect(body.outcome).to.eql('event_id_conflict'));",
+                  "pm.test('the changed payload is not applied', () => pm.expect(body.applied).to.be.false);",
+                  "pm.test('order stays succeeded', () => pm.expect(body.order.status).to.eql('succeeded'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhooks/payment-provider",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhooks",
+                "payment-provider"
+              ]
+            },
+            "description": "The provider reuses an event id for different content: counted, acknowledged, never processed twice.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"{{evt_succeeded}}\",\n  \"type\": \"payment.failed\",\n  \"data\": {\n    \"orderReference\": \"{{order_reference}}\",\n    \"providerPaymentId\": \"pay_postman_1\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "5. Event for an unknown order (order_not_found)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('outcome is order_not_found', () => pm.expect(body.outcome).to.eql('order_not_found'));",
+                  "pm.test('nothing applied', () => pm.expect(body.applied).to.be.false);",
+                  "pm.test('no order in the response', () => pm.expect(body.order).to.eql(null));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhooks/payment-provider",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhooks",
+                "payment-provider"
+              ]
+            },
+            "description": "The event is stored and applied on a later delivery once the order exists.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"evt_pm_unknown_1\",\n  \"type\": \"payment.succeeded\",\n  \"data\": {\n    \"orderReference\": \"ORDER-DOES-NOT-EXIST-1\",\n    \"providerPaymentId\": \"pay_postman_2\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "03 Read",
+      "description": "Order status lookups.",
+      "item": [
+        {
+          "name": "Get order by business reference",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('reference matches', () => pm.expect(body.order.orderReference).to.eql(pm.collectionVariables.get('order_reference')));",
+                  "pm.test('amount is unchanged', () => pm.expect(body.order.amountMinor).to.eql(2599));",
+                  "console.log('order', body.order);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/orders/{{order_reference}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "orders",
+                "{{order_reference}}"
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "Get order by id",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('id matches', () => pm.expect(pm.response.json().order.id).to.eql(pm.collectionVariables.get('order_id')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/orders/id/{{order_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "orders",
+                "id",
+                "{{order_id}}"
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "Unknown reference (expect 404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 Not Found', () => pm.response.to.have.status(404));",
+                  "pm.test('error code', () => pm.expect(pm.response.json().error.code).to.eql('not_found'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/orders/ORDER-DOES-NOT-EXIST-1",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "orders",
+                "ORDER-DOES-NOT-EXIST-1"
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "Malformed id (expect 400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
+                  "pm.test('error code', () => pm.expect(pm.response.json().error.code).to.eql('invalid_request'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/orders/id/not-a-uuid",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "orders",
+                "id",
+                "not-a-uuid"
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        },
+        {
+          "name": "Health check",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('database reachable', () => pm.expect(pm.response.json().database).to.eql('reachable'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": ""
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "order_reference",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "order_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "evt_succeeded",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "evt_failed",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "evt_parallel",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "event": []
+}

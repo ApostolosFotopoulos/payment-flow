@@ -1,0 +1,7 @@
+node_modules/
+dist/
+coverage/
+package-lock.json
+
+# generated Postman files: keep them exactly as imported
+postman/*.json
